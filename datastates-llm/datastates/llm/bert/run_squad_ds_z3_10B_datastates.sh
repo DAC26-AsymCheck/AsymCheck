@@ -25,7 +25,6 @@ CONFIG_FILE=${13:-"../bert_configs/10B.json"}
 max_steps=${14:-"-1"}
 
 
-
 density="${density:-1}"
 threshold="${threshold:-8192}"
 compressor="${compressor:-topkef}"

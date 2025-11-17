@@ -19,7 +19,9 @@ This code repository covers:
 - [CheckFreq](https://github.com/msr-fiddle/CheckFreq)
 - [EXcp](https://github.com/Gaffey/ExCP)
 
+
 # Implementation
+
 
 **AsymCheck** employs a decoupled and hierarchical storage design for checkpointing and consists of four modules:
 

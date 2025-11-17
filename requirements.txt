@@ -102,9 +102,9 @@ tzlocal==5.2
 uritools==4.0.3
 wcwidth==0.2.13
 wheel==0.43.0
-xxhash==3.5.0
-yarl==1.9.4
-zipp==3.20.0
+
+
+
 
 
 

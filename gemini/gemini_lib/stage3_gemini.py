@@ -33,7 +33,6 @@ from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedO
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import z3_leaf_parameter
-
 from collections import deque
 
 # Toggle this to true to enable correctness test
@@ -63,7 +62,6 @@ def input(msg):
 
 def isclose(a, b, rtol=1e-09, atol=0.0):
     return abs(a - b) <= max(rtol * max(abs(a), abs(b)), atol)
-
 
 def lcm(x, y):
     from fractions import gcd  # or can import gcd from `math` in Python 3

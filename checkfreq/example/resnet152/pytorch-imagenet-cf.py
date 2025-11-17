@@ -4,7 +4,6 @@ import shutil
 import time
 import math
 import sys
-
 import torch.distributed
 sys.path.append('./')
 sys.path.append('../../checkfreq_lib')
@@ -39,7 +38,7 @@ try:
      set_start_method('spawn')
 except RuntimeError:
     pass
-
+# 
 # try:
 #     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
 #     from nvidia.dali.pipeline import Pipeline
@@ -47,7 +46,7 @@ except RuntimeError:
 #     import nvidia.dali.types as types
 # except ImportError:
 #     raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
-
+# 
 
 import threading
 

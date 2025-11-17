@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-
 # DeepSpeed Team
-
 import sys
 import types
 import json
@@ -12,6 +10,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from packaging import version as pkg_version
 from .checkpointing import *
+
+
 
 # Skip Triton import for AMD due to pytorch-triton-rocm module breaking device API in DeepSpeed
 if not (hasattr(torch.version, 'hip') and torch.version.hip is not None):

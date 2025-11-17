@@ -37,7 +37,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data.distributed
 
-
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -48,18 +47,11 @@ from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-
-
-
 import os
 import math
 from tqdm import tqdm
 
 # from utils_model import get_network
-
-
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -71,7 +63,6 @@ import shutil
 from typing import Dict, Optional
 import torchsnapshot
 from torchsnapshot import Snapshot, Stateful
-
 
 from utils_gpt import get_argument_parser, \
     get_summary_writer, write_summary_events, \

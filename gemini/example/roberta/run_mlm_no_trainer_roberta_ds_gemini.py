@@ -38,7 +38,6 @@ import torch.optim as optim
 import torch.utils.data.distributed
 import torch.distributed as dist
 
-
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -49,14 +48,11 @@ from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-
-
 import sys
 # sys.path.append("../") 
 from utils_roberta import get_argument_parser, \
     get_summary_writer, write_summary_events, \
     is_time_to_exit, check_early_exit_warning
-
 
 import transformers
 from transformers import (
@@ -75,11 +71,6 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 import deepspeed
 
-
-
-import numpy as np
-
-import numpy as np
 import matplotlib.pyplot as plt
 import time
 import timeit

@@ -13,10 +13,8 @@ from datastates.ckpt import CkptEngine
 from .helper import parse_config, get_checkpoint_version, HOST_CACHE_SIZE, CKPT_PARSER_THREADS
 from datastates.utils import get_logger
 
-
 SIZE_UINT64 = ctypes.sizeof(ctypes.c_uint64)
 KEY_SEPARATOR = "|"
-
 
 class Checkpointing:
     def __init__(self, runtime_config={}, rank=0) -> None:

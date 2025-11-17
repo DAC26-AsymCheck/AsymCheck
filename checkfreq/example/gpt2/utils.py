@@ -64,10 +64,6 @@ def get_argument_parser():
                         type=int,
                         help="Total batch size for predictions.")
     
-
-    
-
-    
     parser.add_argument(
         "--warmup_proportion",
         default=0.1,

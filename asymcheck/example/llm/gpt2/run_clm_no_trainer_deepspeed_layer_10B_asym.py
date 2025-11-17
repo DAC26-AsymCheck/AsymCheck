@@ -17,7 +17,6 @@
 Fine-tuning the library models for causal language modeling (GPT, GPT-2, CTRL, ...)
 on a text file or a dataset without using HuggingFace Trainer.
 
-
 Here is the full list of checkpoints on the hub that can be fine-tuned by this script:
 https://huggingface.co/models?filter=text-generation
 """
@@ -38,7 +37,6 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data.distributed
-
 import datasets
 import torch
 # from accelerate import Accelerator, DistributedType
@@ -51,8 +49,6 @@ from tqdm.auto import tqdm
 from multiprocessing import shared_memory
 import torch.distributed as dist
 import threading  
-
-
 
 
 import sys

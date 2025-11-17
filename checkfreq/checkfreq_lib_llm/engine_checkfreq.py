@@ -3683,3 +3683,4 @@ class DeepSpeedEngine(Module):
     @property
     def is_compiled(self) -> bool:
         return self._is_compiled
+

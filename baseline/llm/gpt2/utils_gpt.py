@@ -9,7 +9,6 @@ SUMMARY_WRITER_DIR_NAME = 'runs'
 
 def get_argument_parser():
     parser = argparse.ArgumentParser()
-
     # Required parameters
     parser.add_argument(
         "--bert_model",

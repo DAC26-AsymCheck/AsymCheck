@@ -26,7 +26,6 @@ extensions = [
     )    
 ]
 
-
 # 
 # ---- Install CPP/CUDA checkpointing engine and expose Python bindings
 setup(

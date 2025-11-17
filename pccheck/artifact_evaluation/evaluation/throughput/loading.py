@@ -21,7 +21,6 @@ def _to_gpu(ele, snapshot=None):
         return ele
     return snapshot
 
-
 def get_load_time(input_file):
     # get time to bring the checkpoint back to GPU mem
 
@@ -41,5 +40,8 @@ def get_load_time(input_file):
         end_time = time.time()
         print(f"Time is {end_time-start_time} sec")
 
+
 if __name__ == "__main__":
     get_load_time(sys.argv[1])
+
+

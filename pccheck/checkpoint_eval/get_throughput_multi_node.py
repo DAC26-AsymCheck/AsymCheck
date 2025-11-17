@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+
+
 home_dir = os.path.expanduser("~")
 lib_path = f"{home_dir}/pccheck/checkpoint_eval/pccheck/libtest_ssd.so"
 script_dir = f"{home_dir}/transformers/examples/pytorch/language-modeling"
@@ -11,6 +13,7 @@ this_dir = f"{home_dir}/pccheck/artifact_evaluation/evaluation/throughput"
 cfreqs = [10]
 iters = 50
 WARMUP = 3
+
 
 label_dict = {
     "cfreq": "CheckFreq",

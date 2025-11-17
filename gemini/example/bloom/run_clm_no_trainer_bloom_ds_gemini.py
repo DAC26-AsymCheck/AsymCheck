@@ -69,16 +69,10 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 import deepspeed
 
-
-
-import numpy as np
-
 import numpy as np
 import matplotlib.pyplot as plt
 import time
 import timeit
-import numpy as np
-
 
 # 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.

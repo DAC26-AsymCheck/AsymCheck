@@ -35,14 +35,15 @@ from torch.nn import CrossEntropyLoss
 from torch.utils import checkpoint
 
 from file_utils import cached_path
-
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import torch.nn.init as init
 from collections import OrderedDict
 
+
 logger = logging.getLogger(__name__)
+
 
 PRETRAINED_MODEL_ARCHIVE_MAP = {
     'bert-base-uncased': "https://s3.amazonaws.com/models.huggingface.co/bert/bert-base-uncased.tar.gz",
