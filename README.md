@@ -15,7 +15,7 @@ This code repository covers:
 
 - [PCcheck](https://github.com/eth-easl/pccheck)
 - [DataStates-LLM](https://github.com/DataStates/datastates-llm)
-- [Gemini](https://github.com/ASPLOS26-AsymCheck/AsymCheck/tree/main/gemini)
+- [Gemini](https://github.com/DAC26-AsymCheck/AsymCheck/tree/main/gemini)
 - [CheckFreq](https://github.com/msr-fiddle/CheckFreq)
 - [EXcp](https://github.com/Gaffey/ExCP)
 
@@ -51,7 +51,7 @@ The system architecture of **AsymCheck** is as follows:
 
 ## **Get the code**
 ``` shell
-git clone https://github.com/ASPLOS26-AsymCheck/AsymCheck
+git clone https://github.com/DAC26-AsymCheck/AsymCheck
 cd AsymCheck
 pip install -r requirements.txt
 python setup.py
