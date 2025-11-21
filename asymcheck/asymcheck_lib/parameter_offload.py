@@ -23,7 +23,8 @@ import time
 FWD_MODULE_STACK = list()
 
 
-#for each tensor in outputs run the forward_function and register backward_function as hook
+# 
+# for each tensor in outputs run the forward_function and register backward_function as hook
 def _apply_forward_and_backward_to_tensors_only(module, forward_function, backward_function, outputs):
     if type(outputs) is tuple:
         touched_outputs = []
@@ -286,14 +287,8 @@ class DeepSpeedZeRoOffload(object):
 
         @instrument_w_nvtx
         def _pre_forward_module_hook(module, *args):
-            
-            if profiling_data["forward_start_times"]: # 
-                 profiling_data["forward_comm_end_times"].append(comm_end_time)
-            
-            if i < len(self.param_groups) - 1: 
-                profiling_data["forward_start_times"].append(time.time())
-            
-            # Modify
+            # 
+            # Profiling forward idle periods
             self.pre_sub_module_forward_function(module)
         
         
@@ -346,7 +341,7 @@ class DeepSpeedZeRoOffload(object):
                 "output tensors and therefore may not get triggered properly."
 
         def _pre_backward_module_hook(module, inputs, output):
-
+            # Profiling forward idle periods
             if not hasattr(module, "pre_bwd_fn"):
 
                 @instrument_w_nvtx
@@ -356,8 +351,7 @@ class DeepSpeedZeRoOffload(object):
                     # counting to support this scenario
                     #print(f"COUNTER before: {sub_module.applied_pre_backward_ref_cnt}")
                     if sub_module.applied_pre_backward_ref_cnt > 0:
-                        
-                        # Modify 
+                        # Profiling forward idle periods
                         self.pre_sub_module_backward_function(sub_module)
                         sub_module.applied_pre_backward_ref_cnt -= 1
                     #print(f"COUNTER after: {sub_module.applied_pre_backward_ref_cnt}")
@@ -473,7 +467,7 @@ class DeepSpeedZeRoOffload(object):
         if param_coordinator.is_record_trace():
             param_coordinator.record_module(sub_module)
         
-        # Forward
+        # Profiling forward idle periods
         param_coordinator.fetch_sub_module(sub_module, forward=True, fetch_type=0)
         
         
@@ -500,7 +494,7 @@ class DeepSpeedZeRoOffload(object):
         if param_coordinator.is_record_trace():
             param_coordinator.record_module(sub_module)
         
-        # Backward
+        # Profiling forward idle periods
         param_coordinator.fetch_sub_module(sub_module, forward=False, fetch_type=0)
 
     @torch.no_grad()

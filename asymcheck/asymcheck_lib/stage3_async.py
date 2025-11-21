@@ -84,12 +84,6 @@ INITIAL_MICRO_STEP_ID = -1
 
 
 
-
-
-
-
-
-
 class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     """
     DeepSpeedZeroOptimizer designed to reduce the memory footprint

@@ -333,13 +333,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         reduce_bucket_size = 500000000
         self.reduce_bucket_size = int(reduce_bucket_size)
 
-        self.total_size =0
+        self.ckpt_size =0
         for key, value in module.state_dict().items():
             # if 'lm_head.weight' not in key:
             tensor_numel = value.numel()
-            self.total_size += tensor_numel
+            self.ckpt_size += tensor_numel
+        
 
-        self.partition_model_size = self.total_size
+        
+        self.partition_model_size = self.ckpt_size
         print('self.partition_model_size = ', self.partition_model_size)
 
         self.model_stream = torch.cuda.Stream()
@@ -539,7 +541,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
             
 
-        num_groups = math.ceil(self.total_size / self.reduce_bucket_size)        
+        num_groups = math.ceil(self.ckpt_size / self.reduce_bucket_size)        
         self.param_groups = self._split_params_into_groups(num_groups) 
     
     def _split_params_into_groups(self, num_groups):
@@ -727,7 +729,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return device_buffer
 
     def _get_param_coordinator(self, training):
-        return self.parameter_offload.get_param_coordinator(training)
+        return self.parameter_offload.get_param_coordinator(training,self.ckpt_size)
 
     def _configure_offloading(self, offload_optimizer_config, offload_param_config):
         ###################### offload optimizer setup ##################################

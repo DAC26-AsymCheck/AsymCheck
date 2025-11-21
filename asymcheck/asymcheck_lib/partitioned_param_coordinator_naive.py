@@ -34,7 +34,7 @@ import numpy as np
 import multiprocessing
 import queue  
 import logging
-from asymcheckpoint import AsymCheckpoint
+
 ENABLE_PROFILER = False
 
 
@@ -100,9 +100,8 @@ class PartitionedParameterCoordinator:
         timers=None,
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
-        ckpt_size = None,
+        iteration=None
     ) -> None:
-        self.ckpt_size = ckpt_size
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
@@ -146,18 +145,30 @@ class PartitionedParameterCoordinator:
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
         
         self.iteration = iteration
-        # initialization AsymCheckpoint
-        ckpt = AsymCheckpoint(
-            ckpt_size=self.ckpt_size,
-            warmup=10,
-            parallel_threads=4,
-            ratio=0.01,
-            # 64MB
-            opt_batch_size=64 * 1024*1024,
-        )
-        # Start the disk flashing process
-        ckpt.start_flushing_worker()
+        # 64MB
+        self.opt_batch_size=64*1024*1024
+        self.warmup = 10
+        self.parallel_threads = 32
+        self.ratio = 0.01        
+        self.queue: multiprocessing.Queue = multiprocessing.Queue(maxsize=32)
+        self.s_event = multiprocessing.Event()
         
+        self.profiling_data: Dict[str, List[float]] = {
+            "fd_start_times": [], "fd_comm_end_times": [],
+            "bd_start_times": [], "bd_comm_end_times": [],
+        }
+        
+        self.checkpointing_data: Dict[str, Any] = {
+            "p_sizes": None, "cpu_buffers": None,
+            "stream": torch.cuda.Stream() if torch.cuda.is_available() else None,
+            "cp_params": None, "pre_ckpt_data": None,
+            
+            "batch": {
+                "cp_chunks": [],
+                "cur_batch_size": 0
+                }
+        }
+    
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
@@ -386,28 +397,28 @@ class PartitionedParameterCoordinator:
             # kick off all gather for params in the next few submodules (prefetch)
             if self.__prefetch_bucket_sz > 0:
                 if forward:
-                    # Profiling forward idle time 
-                    if self.ckpt.profiling_data["fw_start_times"]: # 
-                        self.ckpt.profiling_data["fw_end_times"].append(comm_end_time)
+                    # Profiling
+                    if self.profiling_data["fd_start_times"]: # 
+                        self.profiling_data["fd_comm_end_times"].append(comm_end_time)
                     
                     if self.__step_id < len(self.param_groups) - 1: 
-                        self.ckpt.profiling_data["fw_start_times"].append(time.time())
+                        self.profiling_data["fd_start_times"].append(time.time())
                     
-                    # 
-                    self.async_checkpoint(self, 'forward', self.__step_id, param)
-        
+                    # Copying
+                    self.async_checkpoint_partition(self, 'forward', self.__step_id, param)
+                    
                     
                 else:
-                    # Profiling backward idle time 
-                    if self.profiling_data["bw_start_times"]: # 
-                        self.profiling_data["bw_end_times"].append(comm_end_time)
+                    # backward, Profiling
+                    if self.profiling_data["bd_start_times"]: # 
+                        self.profiling_data["bd_comm_end_times"].append(comm_end_time)
                     
                     if self.__step_id < len(self.param_groups) - 1: 
-                        self.profiling_data["bw_start_times"].append(time.time())
+                        self.profiling_data["bd_start_times"].append(time.time())
                     
-                    # 
-                    self.async_checkpoint(self, 'backward', self.__step_id, param)
-        
+                    # Copying
+                    self.async_checkpoint_partition_with_compression('backward', self.__step_id, param)
+                    
                 
                 max_params_to_prefetch = min(self.__max_n_available_params - self.__n_available_params,
                                              self.__prefetch_bucket_sz)
@@ -449,7 +460,312 @@ class PartitionedParameterCoordinator:
 
         self.__step_id += 1
     
+        
+    def profile_idle_periods_naive(self, iteration):
+        if iteration < self.warmup:
+            return False 
+
+
+        self.forward_idle_times = []
+
+        for i in range(len(self.profiling_data["fd_start_times"])):
+            idle_start = self.profiling_data["fd_comm_end_times"][i]
+            idle_end = self.profiling_data["fd_start_times"][i]
+            idle_time = idle_end - idle_start
+            self.forward_idle_times.append(idle_time)
     
+        T_f = sum(self.forward_idle_times)
+        self.backward_idle_times = []
+        
+        bd_start_times = self.profiling_data.get("bd_start_times", [])
+        for i in range(len(bd_start_times)):
+            if i < len(self.profiling_data["bd_comm_end_times"]):
+                idle_start = self.profiling_data["bd_comm_end_times"][i]
+                idle_end = bd_start_times[i]
+                idle_time = idle_end - idle_start
+                self.backward_idle_times.append(idle_time)
+
+        T_b = sum(self.backward_idle_times)
+
+        total_idle_time = T_f + T_b
+        if total_idle_time <= 1e-9: #
+            return False
+
+        R = self.total_size
+        forward_p_sizes = []
+        for t_fi in self.forward_idle_times:
+            r_fi = R * (t_fi / total_idle_time)
+            forward_p_sizes.append(int(round(r_fi)))
+
+        backward_p_sizes = []
+        for t_bj in self.backward_idle_times:
+            r_bj = R * (t_bj / total_idle_time)
+            backward_p_sizes.append(int(round(r_bj)))
+        
+        forward_p_sizes[-1] = R - sum(forward_p_sizes[:-1])
+        backward_p_sizes[-1] = R - sum(backward_p_sizes[:-1])
+
+        self.checkpointing_data["p_sizes"] = {
+            "forward": forward_p_sizes,
+            "backward": backward_p_sizes
+        }
+
+        cpu_buffers = {
+            "forward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in forward_p_sizes],
+            "backward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in backward_p_sizes]
+        }
+        self.checkpointing_data["cpu_buffers"] = cpu_buffers
+    
+        return True
+
+
+    def async_checkpoint_partition_naive(self, partition_type, partition_idx, data):
+        coordinator = self._get_param_coordinator(training=True)
+
+        if coordinator.checkpointing_data["p_sizes"] is None:
+            return
+
+        sizes = coordinator.checkpointing_data["p_sizes"][partition_type]
+        buffers = coordinator.checkpointing_data["cpu_buffers"][partition_type]
+        stream = coordinator.checkpointing_data["stream"]
+
+        if partition_idx < len(sizes) and stream is not None:
+            chunk_size = sizes[partition_idx]
+            data_chunk = data.flatten()[:chunk_size].clone() 
+    
+            with torch.cuda.stream(stream):
+
+                buffers[partition_idx].copy_(data_chunk, non_blocking=True)
+    
+    
+    def profile_compression_and_write_overheads(self):
+        ratio = 0.01
+        params = {}
+
+        test_sizes = [64*1024, 256*1024, 1024*1024] # 64KB, 256KB, 1MB
+        compression_times = []
+    
+        for size in test_sizes:
+            dummy_data = torch.randn(size, device='cpu')
+            start_time = time.time()
+
+            k = int(size * ratio)
+            _, _ = torch.topk(torch.abs(dummy_data), k)
+            end_time = time.time()
+            elapsed = end_time - start_time
+            compression_times.append(elapsed)
+
+        x = np.array(test_sizes, dtype=np.float64)
+        y = np.array(compression_times, dtype=np.float64)
+        A = np.vstack([x, np.ones(len(x))]).T
+        beta_c, alpha_c = np.linalg.lstsq(A, y, rcond=None)[0]
+        params['alpha_c'] = alpha_c
+        params['beta_c'] = beta_c
+
+        write_times = []
+        for size in test_sizes:
+            dummy_data = torch.randn(size, device='cpu')
+            start_time = time.time()
+
+            _ = dummy_data.numpy().tobytes() 
+            end_time = time.time()
+            elapsed = end_time - start_time
+            write_times.append(elapsed)
+
+
+        y = np.array(write_times, dtype=np.float64)
+        beta_w, alpha_w = np.linalg.lstsq(A, y, rcond=None)[0]
+        params['alpha_w'] = alpha_w
+        params['beta_w'] = beta_w
+
+
+        return params
+
+
+    def should_compress(self, partition_size, params):
+        alpha_c, beta_c = params['alpha_c'], params['beta_c']
+        alpha_w, beta_w = params['alpha_w'], params['beta_w']
+        ratio = 0.01
+
+        t_write_uncompressed = alpha_w + beta_w * partition_size
+ 
+        t_compress = alpha_c + beta_c * partition_size
+        compressed_size = int(partition_size * (ratio * 2)) 
+        t_write_compressed = alpha_w + beta_w * compressed_size
+    
+        # 
+        if t_compress + t_write_compressed < t_write_uncompressed:
+            return True, t_compress + t_write_compressed, t_write_uncompressed
+        else:
+            return False, t_compress + t_write_compressed, t_write_uncompressed
+
+
+    def compress_chunk(self, chunk, compression_ratio) :
+        original_shape = chunk.shape
+        chunk_flat = chunk.flatten()
+        k = max(1, int(chunk_flat.numel() * compression_ratio)) 
+    
+        values, indices = torch.topk(torch.abs(chunk_flat), k)
+    
+        return {
+            'values': values,
+           'indices': indices,
+            'original_shape': original_shape
+        }
+
+
+    def parallel_compress_data(self, data, num_threads, compression_ratio):
+    
+        chunks = torch.chunk(data, num_threads)
+    
+        cp_chunks = []
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(self.compress_chunk, chunk, compression_ratio) for chunk in chunks]
+        
+            for future in futures:
+                cp_chunks.append(future.result())
+            
+        return cp_chunks
+
+    
+    def async_checkpoint_partition_with_compression(self, partition_type, partition_idx, data):
+
+        if self.checkpointing_data["p_sizes"] is None or self.checkpointing_data["cp_params"] is None:
+            return
+
+        sizes = self.checkpointing_data["p_sizes"][partition_type]
+        if partition_idx >= len(sizes): return
+
+        partition_size = sizes[partition_idx]
+        chunk_size = partition_size
+        
+        prev_data = self.checkpointing_data["pre_ckpt_data"].get(f"{partition_type}_{partition_idx}") if self.checkpointing_data["pre_ckpt_data"] else None
+        delta_data = data.flatten()[:chunk_size] - prev_data if prev_data is not None else data.flatten()[:chunk_size]
+    
+        if not self.checkpointing_data["pre_ckpt_data"]:
+            self.checkpointing_data["pre_ckpt_data"] = {}
+        self.checkpointing_data["pre_ckpt_data"][f"{partition_type}_{partition_idx}"] = data.flatten()[:chunk_size].clone()
+    
+        compress, t_compressed_total, t_uncompressed = self.should_compress(partition_size, self.checkpointing_data["cp_params"])
+        
+        if compress:
+            start_time = time.time()
+            cp_chunks = self.parallel_compress_data(delta_data, self.parallel_threads, self.ratio)
+            end_time = time.time()
+        
+    
+    def flushing_worker_process(self, queue, shutdown_event):
+        checkpoint_counter = 0
+        while not shutdown_event.is_set():
+            try:
+                data_to_flush = queue.get(timeout=1)
+                checkpoint_counter += 1
+
+                with open(f"checkpoint_batch_{checkpoint_counter}.bin", 'wb') as f:
+                    torch.save(data_to_flush, f)
+
+            except queue.Empty:
+                continue
+
+
+    def enqueue_for_flushing(self, data, is_compressed_batch):
+        if is_compressed_batch:
+            chunk_size_bytes = data['values'].numel() * data['values'].element_size() + \
+                           data['indices'].numel() * data['indices'].element_size()
+        
+            if (self.checkpointing_data["batch"]["cur_batch_size"] + chunk_size_bytes) < self.opt_batch_size:
+                self.checkpointing_data["batch"]["cp_chunks"].append(data)
+                self.checkpointing_data["batch"]["cur_batch_size"] += chunk_size_bytes
+                return
+            else:
+    
+                if self.checkpointing_data["batch"]["cp_chunks"]:
+                    batch_to_send = {
+                        'type': 'compressed_batch',
+                        'data': self.checkpointing_data["batch"]["cp_chunks"]
+                    }
+                    self.queue.put(batch_to_send)    
+                    self.checkpointing_data["batch"]["cp_chunks"] = []
+                    self.checkpointing_data["batch"]["cur_batch_size"] = 0
+
+            batch_to_send = {'type': 'compressed_batch', 'data': [data]}
+            self.queue.put(batch_to_send)
+            self.checkpointing_data["batch"]["cur_batch_size"] = chunk_size_bytes
+    
+        else:
+            data_to_send = {'type': 'uncompressed', 'data': data}
+            self.queue.put(data_to_send)
+   
+    
+    def profile_idle_periods(self, iteration, model):
+        if iteration < self.warmup: return False
+        self.forward_idle_times = []
+
+        for i in range(len(self.profiling_data["fd_start_times"])):
+            idle_start = self.profiling_data["fd_comm_end_times"][i]
+            idle_end = self.profiling_data["fd_start_times"][i]
+            idle_time = idle_end - idle_start
+            self.forward_idle_times.append(idle_time)
+    
+        T_f = sum(self.forward_idle_times)
+        self.backward_idle_times = []
+        
+        bd_start_times = self.profiling_data.get("bd_start_times", [])
+        for i in range(len(bd_start_times)):
+            if i < len(self.profiling_data["bd_comm_end_times"]):
+                idle_start = self.profiling_data["bd_comm_end_times"][i]
+                idle_end = bd_start_times[i]
+                idle_time = idle_end - idle_start
+                self.backward_idle_times.append(idle_time)
+
+        T_b = sum(self.backward_idle_times)
+        
+        total_idle_time = T_f + T_b
+        R = self.ckpt_size
+        forward_partition_sizes = [int(R * (t / total_idle_time)) for t in self.forward_idle_times]
+        backward_partition_sizes = [int(R * (t / total_idle_time)) for t in self.backward_idle_times]
+        forward_partition_sizes[-1] = R - sum(forward_partition_sizes[:-1])
+        backward_partition_sizes[-1] = R - sum(backward_partition_sizes[:-1])
+        self.checkpointing_data["partition_sizes"] = {"forward": forward_partition_sizes, "backward": backward_partition_sizes}
+        self.checkpointing_data["cp_params"] = self.profile_compression_and_write_overheads()
+        return True
+
+
+    def async_checkpoint_partition_with_batching(self, partition_type, partition_idx, data):
+        if self.checkpointing_data["partition_sizes"] is None or self.checkpointing_data["cp_params"] is None: return
+        sizes = self.checkpointing_data["partition_sizes"][partition_type]
+        if partition_idx >= len(sizes): return
+    
+        partition_size = sizes[partition_idx]
+        chunk_data = data.flatten()[:partition_size].clone().cpu()
+    
+        prev_key = f"{partition_type}_{partition_idx}"
+        prev_data = self.checkpointing_data["pre_ckpt_data"].get(prev_key) if self.checkpointing_data["pre_ckpt_data"] else None
+        delta_data = chunk_data - prev_data if prev_data is not None else chunk_data
+        self.checkpointing_data["pre_ckpt_data"] = self.checkpointing_data.get("pre_ckpt_data", {})
+        self.checkpointing_data["pre_ckpt_data"][prev_key] = chunk_data
+    
+        compress, _, _ = self.should_compress(partition_size, self.checkpointing_data["cp_params"])
+    
+        if compress:
+            compressed_chunks = self.parallel_compress_data(delta_data, self.parallel_threads, ratio)
+            for chunk in compressed_chunks:
+                self.enqueue_for_flushing(chunk, is_compressed_batch=True)
+        else:
+            self.enqueue_for_flushing(delta_data, is_compressed_batch=False)
+
+
+    def save_full_checkpoint(self, model, optimizer, epoch, path="./full_checkpoint.pt"):
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+        torch.save(checkpoint, path)
+
+    
+    
+
     @instrument_w_nvtx
     @torch.no_grad()
     def release_sub_module(self, submodule: Module) -> None:

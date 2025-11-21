@@ -2188,7 +2188,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
 
         self.elements_copy_to_memory.clear()
-    self.parameter_cpu = None
+        self.parameter_cpu = None
 
 
 
