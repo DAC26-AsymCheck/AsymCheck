@@ -293,6 +293,7 @@ class DeepSpeedZeRoOffload(object):
             if i < len(self.param_groups) - 1: 
                 profiling_data["forward_start_times"].append(time.time())
             
+            # Modify
             self.pre_sub_module_forward_function(module)
         
         
@@ -355,6 +356,8 @@ class DeepSpeedZeRoOffload(object):
                     # counting to support this scenario
                     #print(f"COUNTER before: {sub_module.applied_pre_backward_ref_cnt}")
                     if sub_module.applied_pre_backward_ref_cnt > 0:
+                        
+                        # Modify 
                         self.pre_sub_module_backward_function(sub_module)
                         sub_module.applied_pre_backward_ref_cnt -= 1
                     #print(f"COUNTER after: {sub_module.applied_pre_backward_ref_cnt}")
