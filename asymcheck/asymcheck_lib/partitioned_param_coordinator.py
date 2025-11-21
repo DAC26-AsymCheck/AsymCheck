@@ -451,8 +451,9 @@ class PartitionedParameterCoordinator:
 
         self.__step_id += 1
     
-        
-    def profile_idle_periods_back(self, iteration):
+    # 
+    # Modify 
+    def profile_idle_periods_naive(self, iteration):
         if iteration < self.WARMUP_ITERATIONS:
             print(f"Iteration {iteration+1}: Skipping checkpointing (warmup for profiling).")
             return False 
@@ -522,7 +523,7 @@ class PartitionedParameterCoordinator:
     
         return True
 
-    def async_checkpoint_partition_back(self, partition_type, partition_idx, data):
+    def async_checkpoint_partition_naive(self, partition_type, partition_idx, data):
         coordinator = self._get_param_coordinator(training=True)
 
         if coordinator.checkpointing_data["partition_sizes"] is None:
