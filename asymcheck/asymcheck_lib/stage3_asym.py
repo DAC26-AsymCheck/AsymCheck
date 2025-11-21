@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-
+# 
 # DeepSpeed Team
 
 import sys
@@ -35,6 +35,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import z3_leaf_parameter
 import time
 import multiprocessing as mp
+from typing import Dict, List, Optional, Any
+
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -133,6 +135,9 @@ def unwrap_model_for_generation(model):
 INITIAL_MICRO_STEP_ID = -1
 
 
+
+
+
 class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     """
     DeepSpeedZeroOptimizer designed to reduce the memory footprint
@@ -156,12 +161,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         dynamic_loss_args=None,
         verbose=True,
         contiguous_gradients=True,
-
-
         reduce_bucket_size=500000000,
-        
-        
-
         prefetch_bucket_size=50000000,
         max_reuse_distance=1000000000,
         max_live_parameters=1000000000,
@@ -326,32 +326,34 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.postscale_gradients = postscale_gradients
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = 0
-
+        
+        allgather_bucket_size = 500000000
+        self.allgather_bucket_size = int(allgather_bucket_size)
+        
         reduce_bucket_size = 500000000
         self.reduce_bucket_size = int(reduce_bucket_size)
 
-        total_size =0
+        self.total_size =0
         for key, value in module.state_dict().items():
             # if 'lm_head.weight' not in key:
             tensor_numel = value.numel()
-            total_size += tensor_numel
+            self.total_size += tensor_numel
 
-        self.partition_model_size = total_size
+        self.partition_model_size = self.total_size
         print('self.partition_model_size = ', self.partition_model_size)
 
         self.model_stream = torch.cuda.Stream()
+        # 
         # self.optimizer_stream_1 = torch.cuda.Stream()
         # self.optimizer_stream_2 = torch.cuda.Stream()
-        
         # self.gpu_model_buffer = torch.empty(self.reduce_bucket_size, dtype=torch.float16, device=self.device)
-        
-
         # Count the number of gradient elements copied to CPU memory, 
+        # 
         
         self.model_elements_copy_to_memory = []
         self.gpu_optimizer_exp_avg_elements_array =[]
         self.gpu_optimizer_exp_avg_sq_elements_array =[]
-
+        
         self.gpu_optimizer_buffer_avg =None
         self.gpu_optimizer_buffer_avg_sq =None
         
@@ -362,9 +364,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         
         self.gpu_buffer_state = {}
         
+        # 
         # self.process_optimizer = threading.Thread(target=self.first_second_copy_optimizer_async, args=(self.optimizer,))
         # self.process_model = threading.Thread(target=self.copy_model_async, args=(self.module,))
-
+        # 
+        
         self.process_optimizer = None
         self.process_model = None
         
@@ -392,6 +396,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.optimizer_avg_sq_data_flush = None
         
         self.flush_frequency = 10
+        # 
         # self.start_queue =  mp.Queue()
         # self.module_queue = mp.Queue()
         # self.optimizer_queue = mp.Queue()
@@ -408,7 +413,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"ZeRO-3 supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with ZeRO-3 with reduce scatter enabled"
             assert self.postscale_gradients, "pre-scale gradients is not yet supported with ZeRO-3 with reduce scatter enabled"
-
+        # 
         # Holds the mode parameter
         # The param.data may not hold any meaningful data
         # when param's status is NOT_AVAILABLE or IN_FLGHT
@@ -476,15 +481,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.params_already_reduced = {}
         self._release_ipg_buffers()
         self.previous_reduced_grads = None
-
+        
+        # 
         # model parameter traversal-based param id that's stable across runs
         for params_group in self.fp16_groups:
             for param in params_group:
                 param_id = self.get_param_id(param)
                 self.param_dict[param_id] = param
                 self.params_already_reduced[param_id] = False
-
-        #Largest partitioned param
+        # Largest partitioned param
         largest_partitioned_param_numel = 0
         for fp16_partitioned_group in self.fp16_partitioned_groups:
             if len(fp16_partitioned_group) > 0:
@@ -509,9 +514,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # will store the averaged gradients required by this partition
         self.averaged_gradients = {}
-
-        #creates backward hooks for gradient partitioning
-        ###Calls all gather param
+        
+        # 
+        # creates backward hooks for gradient partitioning
+        ### Calls all gather param
         self._grad_acc_hooks = []
         self._leaf_module_hooks = []
         self.create_reduce_and_remove_grad_hooks()
@@ -526,10 +532,28 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.debug_fp16_grads = [{} for _ in self.fp16_groups]
 
         self._link_all_hp_params()
+        
+        self.WARMUP_ITERATIONS = 10
 
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
+            
 
+        num_groups = math.ceil(self.total_size / self.reduce_bucket_size)        
+        self.param_groups = self._split_params_into_groups(num_groups) 
+    
+    def _split_params_into_groups(self, num_groups):
+
+        all_params = list(self.module.state_dict().items)
+        group_size = (len(all_params) + num_groups - 1) // num_groups
+        groups = []
+        for i in range(num_groups):
+            start_idx = i * group_size
+            end_idx = min(start_idx + group_size, len(all_params))
+            groups.append(all_params[start_idx:end_idx])
+        return groups
+
+       
     def destroy(self):
         self.parameter_offload.destroy()
         for hook in self._grad_acc_hooks:
@@ -2432,7 +2456,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 total_size += tensor_numel
                 array_value.append(value)
         
-        
         if dist.get_rank() == 0:
             # print('len(model.state_dict().items()) = ', model.state_dict().items())
             print('model parameter size = ', total_size)
@@ -2453,8 +2476,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.cuda_stream_optimizer_dict_avg[tensor] =torch.cuda.Stream()
                 self.cuda_stream_optimizer_dict_avg_sq[tensor] =torch.cuda.Stream()
                 
-            
-
         for tensor, momentum in optimizer.state.items():
             self.cuda_stream_optimizer_dict_1[tensor].synchronize()
             
@@ -2466,9 +2487,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 if self.iteration % self.flush_frequency==0:
                     self.optimizer_avg_data_flush(parameter_tensor_cpu)
         
+        # 
         # self.module_queue.put((optimizer.model_data, ))
         # self.optimizer_queue.put((cpu_optimizer_array_avg, cpu_optimizer_array_avg, cpu_optimizer_array_avg_sq, cpu_optimizer_array_avg_sq))
- 
+        # 
             self.cuda_stream_optimizer_dict_2[tensor].synchronize()
             # with torch.cuda.stream(self.optimizer_stream_2):
             with torch.cuda.stream(self.cuda_stream_optimizer_dict_2[tensor]): 
@@ -2480,9 +2502,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.optimizer_avg_sq_data_flush(parameter_tensor_cpu)
 
                 
-    
-    # Copying optimizer state to CPU shared memory
     # 
+    # Copying optimizer state to CPU shared memory
     def first_second_optimizer_copy_to_shared_memory(self, rank):
         if self.optimizer_avg_data == None or self.optimizer_avg_sq_data == None:
             
@@ -2526,18 +2547,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             partition_numel_sum = partition.numel()
 
 
-    # 
     #  Copying sub-checkpoints to shared CPU memory
-    # 
     def model_copy_to_shared_memory(self, rank):
         if self.model_data==None:
             return
-        # dq2 = dq1.copy() 
+
         model_buffer_name = 'model_buffer'
         existing_model_shm = shared_memory.SharedMemory(name = model_buffer_name) 
         model_shard_buffer = np.ndarray(self.shape, dtype=np.float16, buffer=existing_model_shm.buf)
         
-        # 
         # Saving sub-checkpoints to shared CPU memory
         partition_numel_sum = 0
         for i in self.model_data:
@@ -2546,58 +2564,58 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             model_shard_buffer[rank, partition_numel_sum : partition_numel_sum + partition_numel] = partition.numpy()
             partition_numel_sum += partition_numel
     
+    # [0.2,1,]
+    # def 
+    
+    
     
     def copy_model_async(self, model):
         torch.cuda.set_device(dist.get_rank())
         
-
         for key, value in model.state_dict().items():
+            
             # stream_.synchronize()
             self.cuda_stream_model_dict[key].synchronize()
-            
             # self.cuda_stream_optimizer_dict_avg = []
-            
-            
             with torch.cuda.stream(self.cuda_stream_model_dict[key]):
+                # 
+                # 
                 # pre_gpu_buffer.append()
                 # tensor_numel = value.numel()
                 # gpu_buffer_state = torch.empty(tensor_numel, dtype=torch.float16, device=self.device)
                 model_tensor_cpu = value.view(-1).to('cpu', non_blocking=True)
                 # parameter_tensor_cpu = self.gpu_buffer_state[key].copy_(value.view(-1), non_blocking=True).to('cpu', non_blocking=True)
-
+                # 
+                # 
         return
 
 
-    
     @instrument_w_nvtx
     def backward(self, loss, retain_graph=False):
         s_time = time.time()
-
+        # 
         # self.first_second_copy_optimizer(self.optimizer)
         # if self.threading_is_start:
         #     self.process_optimizer.join()
-            # self.process_model.join()
+        #     self.process_model.join()
+        # 
         
         if dist.get_rank() == 0:
             print('thread_waiting_time =', time.time() - s_time)
         
-        
         # self.process_optimizer = threading.Thread(target=self.first_second_copy_optimizer_async, args=(self.optimizer,))
         # self.process_optimizer.start()
         
-        
-
-
         if dist.get_rank() == 0:
             print('first_second_copy_optimizer =', time.time() - s_time)
         
-        
         # self.copy_model(self.module, dist.get_rank())
-        
         # self.process_model = threading.Thread(target=self.copy_model_async, args=(self.module,))
 
-        # self.process_model = threading.Thread(target=self.copy_model_async, args=(self.module,))
-        # self.process_model.start()
+        self.process_model = threading.Thread(target=self.copy_model_async, args=(self.module,))
+        self.process_model.start()
+        
+        
         
         self.threading_is_start =True
 

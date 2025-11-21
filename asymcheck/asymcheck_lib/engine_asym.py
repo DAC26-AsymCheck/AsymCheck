@@ -435,7 +435,7 @@ class DeepSpeedEngine(Module):
                 self.autotuning_model_info["trainable_num_params"] = trainable_num_params * self.mp_world_size
 
             logger.info(f"model parameter = {num_params}")
-
+    
     def get_batch_info(self):
         """Get all training batch related settings.
         Returns:
@@ -469,6 +469,7 @@ class DeepSpeedEngine(Module):
         # overwrite config
         self._config.train_batch_size = train_batch_size
         self._config.gradient_accumulation_steps = new_gas
+    
 
     def set_train_micro_batch_size(self, micro_batch_size):
         """Adjust the micro batch size(i.e., the micro batch size in every data parallel group),
@@ -490,6 +491,7 @@ class DeepSpeedEngine(Module):
             self.training_dataloader.data_sampler.set_custom_curriculum_learning_schedule(schedule_func_dict)
 
     def get_global_grad_norm(self) -> float:
+        # 
         """Return the 2-norm of all gradients. If there is model parallelism,
         the norm will be global.
         The computed norm will be cached and reused until the next step() pass.

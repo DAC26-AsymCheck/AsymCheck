@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import collections
 from collections import UserDict
 from typing import Deque, Set
-
+import time
 from deepspeed import comm as dist
 from deepspeed.utils import z3_leaf_module
 from deepspeed.utils.logging import logger
@@ -18,27 +18,21 @@ from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedP
 from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id
 from deepspeed.accelerator import get_accelerator
 import deepspeed.runtime.compiler as compiler
+
+from typing import Dict, List, Optional, Any
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import time
+import numpy as np
+from typing import Dict, List, Optional, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor
-import time
-from collections import OrderedDict, deque
+import os
+
 
 import logging
-
-import time
-
-from sklearn.linear_model import LinearRegression
-import logging
-import uuid
-import shutil
-from typing import Dict, Optional
-import torchsnapshot
-from torchsnapshot import Snapshot, Stateful
-import copy
-import multiprocessing
-# import torch.multiprocessing as tmp
-import torch.multiprocessing as mp
-
-
 
 ENABLE_PROFILER = False
 
@@ -78,7 +72,6 @@ class InflightParamRegistry(UserDict):
         self.data[param] = handle
 
 
-
 class PartitionedParameterCoordinator:
     FORWARD_FETCH_SUBMIT = 'forward_fetch_submit'
     FORWARD_FETCH_WAIT = 'forward_fetch_wait'
@@ -104,9 +97,9 @@ class PartitionedParameterCoordinator:
         inflight_param_registry: InflightParamRegistry,
         prefetch_nvme: bool = False,
         timers=None,
-        start_time = None,
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
+        iteration=None
     ) -> None:
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
@@ -150,28 +143,21 @@ class PartitionedParameterCoordinator:
         self.__max_ongoing_fetch_events: int = 2
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
         
-        start_time = self.start_time
+        self.iteration = iteration
         
-        self.idle_periods = []
-        # 
-        # self.forward_idle_periods = []
-        # self.backward_idle_periods = []
-        self.ckpt_tensor = None
-        self.partitions_cpu = None
-        self.ckpt_numel = None
-        self.optimal_batch_vals = []
-        self.optimal_batch_idxs = []
+        self.profiling_data: Dict[str, List[float]] = {
+            "forward_start_times": [],
+            "forward_comm_end_times": [],
+            "backward_start_times": [],
+            "backward_comm_end_times": [],
+        }
         
-        
-        self.queue = multiprocessing.Queue()
-        self.save_process = multiprocessing.Process(target=_save_ckpt_persistence, args=(self.queue,))
-        self.save_process.start()  
-        print('Start checkpoint flushing!')
-        
-        
-
-
-
+        self.checkpointing_data: Dict[str, Any] = {
+            "partition_sizes": None,  #
+            "cpu_buffers": None,      #
+            "stream": torch.cuda.Stream() if torch.cuda.is_available() else None,
+        }
+    
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
@@ -180,7 +166,6 @@ class PartitionedParameterCoordinator:
 
     Bookkeeping operations used to track where we are in the forward/backward pass
     """
-
 
     def _clear_trace_structures(self) -> None:
         self.__submodule_order = []
@@ -299,17 +284,19 @@ class PartitionedParameterCoordinator:
     """Fetch and Release
     Fetching, prefetching, and releasing parameters
     """
-    
-    # 
-    # Modify by authors
+
     @compiler.disable
     @instrument_w_nvtx
     @torch.no_grad()
     def fetch_sub_module(self, current_submodule: Module, forward: bool) -> None:
+        self.profile_idle_periods(self.iteration)
+        
+        comm_end_time = time.time()
+        
         """This method does the following (in order):
-        1. kick off fetch for parameters in immediately required sub module;
-        2. kick off fetch for next few parameters we will need later (prefetch);
-        3. block on parameters in immediately required sub module;
+        1. kick off fetch for parameters in immediately required sub module
+        2. kick off fetch for next few parameters we will need later (prefetch)
+        3. block on parameters in immediately required sub module
         """
         if logger.isEnabledFor(logging.DEBUG):
             debug_rank0(
@@ -320,37 +307,26 @@ class PartitionedParameterCoordinator:
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        
         params_to_fetch = frozenset(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
-        
-        
+
         if fetch_numel > 0:
             event_name = __class__.FORWARD_FETCH_SUBMIT if forward else __class__.BACKWARD_FETCH_SUBMIT
             self._dump_param_ids(event_name, current_submodule.id,
                                  [p.ds_id for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
-            # for param in params_to_fetch:
+            #for param in params_to_fetch:
             if logger.isEnabledFor(logging.DEBUG):
                 for param in params_to_fetch:
                     debug_rank0(f"-fetch: {param.ds_summary()}")
-            
-            # 
-            # Modify by authors
             self.__all_gather_params(params_to_fetch, forward)
             self.__profiler.stop_event(event_name, fetch_numel)
-            
-            self.idle_periods(time.time() -self.start_time )
-            self.start_time = time.time()
-            
-            
 
         wait_numel = 0
         wait_event_name = __class__.FORWARD_FETCH_WAIT if forward else __class__.BACKWARD_FETCH_WAIT
         self.__profiler.start_event(wait_event_name)
-        # 
         # wait for parameters in the immediately needed submodule to become available
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.id)
@@ -375,13 +351,10 @@ class PartitionedParameterCoordinator:
         if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().wait_stream(self.__allgather_stream)
         self.__profiler.stop_event(wait_event_name, wait_numel)
-        
-        
-        # 
+
         # kick off parameter prefetches for upcoming modules
         # don't prefetch if we dont have a completed model trace
         if self.is_complete_trace():
-            # 
             # go through the parameters we need for the current module and pop them
             # off the fetch queue so that they aren't prefetched later.
             # if params have already been popped off the fetch queue by earlier
@@ -411,11 +384,36 @@ class PartitionedParameterCoordinator:
                     and param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE
             
             
-            # 
+
             # kick off all gather for params in the next few submodules (prefetch)
             if self.__prefetch_bucket_sz > 0:
+                if forward:
+                    # Profiling
+                    if self.profiling_data["forward_start_times"]: # 
+                        self.profiling_data["forward_comm_end_times"].append(comm_end_time)
+                    
+                    if self.__step_id < len(self.param_groups) - 1: 
+                        self.profiling_data["forward_start_times"].append(time.time())
+                    
+                    # Copying
+                    self.async_checkpoint_partition(self, 'forward', self.__step_id, param)
+                    
+                    
+                else:
+                    # backward, Profiling
+                    if self.profiling_data["backward_start_times"]: # 
+                        self.profiling_data["backward_comm_end_times"].append(comm_end_time)
+                    
+                    if self.__step_id < len(self.param_groups) - 1: 
+                        self.profiling_data["backward_start_times"].append(time.time())
+                    
+                    # Copying
+                    self.async_checkpoint_partition_with_compression('backward', self.__step_id, param)
+                    
+                
                 max_params_to_prefetch = min(self.__max_n_available_params - self.__n_available_params,
                                              self.__prefetch_bucket_sz)
+                
                 params_to_prefetch = set()
                 numel_prefetching = 0
                 while self.__param_queue and numel_prefetching < max_params_to_prefetch:
@@ -445,176 +443,281 @@ class PartitionedParameterCoordinator:
                     if logger.isEnabledFor(logging.DEBUG):
                         for param in params_to_prefetch:
                             debug_rank0(f"-prefetch: {param.ds_summary()}")
-
                     self.__all_gather_params(params_to_prefetch, forward)
                     self.__profiler.stop_event(event_name, numel_prefetching)
-                    
-                    idle_time = time.time() - self.start_time
-                    self.idle_periods()
-                    self.start_time = time.time()
-                    
-                    total_time = self.total_time
-                    idle_time_ratio =  idle_time/total_time
-                    
-                    
-
 
                 if self.__prefetch_nvme:
                     self.__prefetch_nvme_param_partitions()
 
         self.__step_id += 1
-        
     
-    # 
-    def copying_snapshot_ckpt(self, idle_time_ratio):
-        partition_length =  idle_time_ratio * self.ckpt_numel
+        
+    def profile_idle_periods_back(self, iteration):
+        if iteration < self.WARMUP_ITERATIONS:
+            print(f"Iteration {iteration+1}: Skipping checkpointing (warmup for profiling).")
+            return False 
 
-        partition_tensor = self.ckpt_tensor.narrow(0, self.partition_start, partition_length)
-        self.partition_start = self.partition_start +partition_length
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            self.partitions_cpu[index].copy_(partition_tensor, non_blocking=True)
-        
-        selective_process = mp.Process(target=selective_partitions, args=(self.partitions_cpu[index], 0.014, self.queue))
-        selective_process.start()
-        
+        print("Profiling Complete. Calculating Partition Sizes")
+
+        forward_idle_times = []
+
+        for i in range(len(self.profiling_data["forward_start_times"])):
+            idle_start = self.profiling_data["forward_comm_end_times"][i]
+            idle_end = self.profiling_data["forward_start_times"][i]
+            idle_time = idle_end - idle_start
+            forward_idle_times.append(idle_time)
+            print(f"Forward Idle Period {i+1}: {idle_time:.6f}s")
     
-    def selective_partitions(self, partition, density = 0.014):
-        if index == len(self.partitions_cpu) -1:
-            index = 0
-            compression_time = self.calculation_compression_time(partition.numel())
-            write_time = self.calculation_write_time(partition.numel())
-            compression_write_time = self.calculation_write_time(partition.numel()*density)
-            
-            if compression_write_time + compression_time < write_time:
-                optimal_batch_size = self.optimal_batch_compute()
-                final_vals, final_idxs = self.chunkwise_topk(partition)
-                
-                self.optimal_batch_vals = torch.cat((self.optimal_batch_vals, final_vals), dim=0)
-                self.optimal_batch_idxs = torch.cat((self.optimal_batch_idxs, final_idxs), dim=0)
-                
-                if len(self.optimal_batch_vals) + len(self.optimal_batch_idxs) >optimal_batch_size:
-                    optimal_batch = [self.optimal_batch_vals, self.optimal_batch_idxs]
-                    self.queue.put(self.optimal_batch)
-                    self.optimal_batch_vals = []
-                    self.optimal_batch_idxs = []
-            else:
-                # Asynchronous multi-threaded parallel compression
-                self.queue.put(partition)
-            
+        T_f = sum(forward_idle_times)
+        print(f"  Total Forward Idle Time (T_f): {T_f:.6f}s")
+        backward_idle_times = []
+        
+        backward_start_times = self.profiling_data.get("backward_start_times", [])
+        for i in range(len(backward_start_times)):
+            if i < len(self.profiling_data["backward_comm_end_times"]):
+                idle_start = self.profiling_data["backward_comm_end_times"][i]
+                idle_end = backward_start_times[i]
+                idle_time = idle_end - idle_start
+                backward_idle_times.append(idle_time)
+                print(f"  Backward Idle Period {i+1}: {idle_time:.6f}s")
+
+        T_b = sum(backward_idle_times)
+        print(f"  Total Backward Idle Time (T_b): {T_b:.6f}s")
+
+        total_idle_time = T_f + T_b
+        if total_idle_time <= 1e-9: #
+            print("  Warning: Total idle time is zero. Cannot size partitions.")
+            return False
+
+        R = self.total_size
+        forward_partition_sizes = []
+        for t_fi in forward_idle_times:
+            r_fi = R * (t_fi / total_idle_time)
+            forward_partition_sizes.append(int(round(r_fi)))
+
+        backward_partition_sizes = []
+        for t_bj in backward_idle_times:
+            r_bj = R * (t_bj / total_idle_time)
+            backward_partition_sizes.append(int(round(r_bj)))
+        
+        forward_partition_sizes[-1] = R - sum(forward_partition_sizes[:-1])
+        backward_partition_sizes[-1] = R - sum(backward_partition_sizes[:-1])
+
+        self.checkpointing_data["partition_sizes"] = {
+            "forward": forward_partition_sizes,
+            "backward": backward_partition_sizes
+        }
+
+        print(f"Calculated Partition Sizes:")
+        print(f"Forward: {forward_partition_sizes} (sum: {sum(forward_partition_sizes)})")
+        print(f"Backward: {backward_partition_sizes} (sum: {sum(backward_partition_sizes)})")
+
+        print("Pre-allocating CPU buffers")
+        cpu_buffers = {
+            "forward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in forward_partition_sizes],
+            "backward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in backward_partition_sizes]
+        }
+        self.checkpointing_data["cpu_buffers"] = cpu_buffers
+        print("Partitioning and Buffer Allocation Complete")
+    
+        return True
+
+    def async_checkpoint_partition_back(self, partition_type, partition_idx, data):
+        coordinator = self._get_param_coordinator(training=True)
+
+        if coordinator.checkpointing_data["partition_sizes"] is None:
+            return
+
+        sizes = coordinator.checkpointing_data["partition_sizes"][partition_type]
+        buffers = coordinator.checkpointing_data["cpu_buffers"][partition_type]
+        stream = coordinator.checkpointing_data["stream"]
+
+        if partition_idx < len(sizes) and stream is not None:
+            chunk_size = sizes[partition_idx]
+            data_chunk = data.flatten()[:chunk_size].clone() 
+    
+            print(f"Async copying {partition_type} partition {partition_idx+1} (size: {chunk_size}) to CPU...")
+            with torch.cuda.stream(stream):
+
+                buffers[partition_idx].copy_(data_chunk, non_blocking=True)
+    
+    def profile_compression_and_write_overheads(self):
+        COMPRESSION_RATIO = 0.01
+        print("Profiling Compression and Write Overheads")
+        params = {}
+
+        test_sizes = [64*1024, 256*1024, 1024*1024] # 64KB, 256KB, 1MB
+        compression_times = []
+    
+        for size in test_sizes:
+            dummy_data = torch.randn(size, device='cpu')
+            start_time = time.time()
+
+            k = int(size * COMPRESSION_RATIO)
+            _, _ = torch.topk(torch.abs(dummy_data), k)
+            end_time = time.time()
+            elapsed = end_time - start_time
+            compression_times.append(elapsed)
+            print(f"  Compression size {size/1024:.0f}KB: {elapsed:.6f}s")
+
+        x = np.array(test_sizes, dtype=np.float64)
+        y = np.array(compression_times, dtype=np.float64)
+        A = np.vstack([x, np.ones(len(x))]).T
+        beta_c, alpha_c = np.linalg.lstsq(A, y, rcond=None)[0]
+        params['alpha_c'] = alpha_c
+        params['beta_c'] = beta_c
+        print(f" Fitted compression model: T_c = {alpha_c:.6f} + {beta_c:.9f} * size")
+
+        write_times = []
+        for size in test_sizes:
+            dummy_data = torch.randn(size, device='cpu')
+            start_time = time.time()
+
+            _ = dummy_data.numpy().tobytes() 
+            end_time = time.time()
+            elapsed = end_time - start_time
+            write_times.append(elapsed)
+            print(f" Write size {size/1024:.0f}KB: {elapsed:.6f}s")
+
+        y = np.array(write_times, dtype=np.float64)
+        beta_w, alpha_w = np.linalg.lstsq(A, y, rcond=None)[0]
+        params['alpha_w'] = alpha_w
+        params['beta_w'] = beta_w
+        print(f"Fitted write model: T_w = {alpha_w:.6f} + {beta_w:.9f} * size")
+    
+        print("Overhead Profiling Complete")
+        return params
+
+    def should_compress(self, partition_size, params):
+        alpha_c, beta_c = params['alpha_c'], params['beta_c']
+        alpha_w, beta_w = params['alpha_w'], params['beta_w']
+        COMPRESSION_RATIO = 0.01
+
+        t_write_uncompressed = alpha_w + beta_w * partition_size
+ 
+        t_compress = alpha_c + beta_c * partition_size
+        compressed_size = int(partition_size * (COMPRESSION_RATIO * 2)) 
+        t_write_compressed = alpha_w + beta_w * compressed_size
+    
+        # 
+        if t_compress + t_write_compressed < t_write_uncompressed:
+            return True, t_compress + t_write_compressed, t_write_uncompressed
         else:
-            index = index +1
-    
-    
+            return False, t_compress + t_write_compressed, t_write_uncompressed
 
-    def chunk_topk_worker(self, chunk, local_k):
-        # Compression
-        vals, idxs = torch.topk(chunk, local_k)
+    def compress_chunk(self, chunk, compression_ratio) :
+        original_shape = chunk.shape
+        chunk_flat = chunk.flatten()
+        k = max(1, int(chunk_flat.numel() * compression_ratio)) 
+    
+        values, indices = torch.topk(torch.abs(chunk_flat), k)
+    
+        return {
+            'values': values,
+           'indices': indices,
+            'original_shape': original_shape
+        }
+
+    def parallel_compress_data(self, data, num_threads, compression_ratio):
+    
+        chunks = torch.chunk(data, num_threads)
+    
+        compressed_chunks = []
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(self.compress_chunk, chunk, compression_ratio) for chunk in chunks]
         
-        return vals, idxs
+            for future in futures:
+                compressed_chunks.append(future.result())
+            
+        return compressed_chunks
 
     
-    def chunkwise_topk(self, large_partition, k, chunk_bytes=4*1024*1024, num_threads=None):
-        # Parallel Compression
-        if num_threads is None:
-            num_threads = os.cpu_count()
-        elem_size = large_partition.element_size()
-        elems_per_chunk = chunk_bytes // elem_size
-        num_chunks = math.ceil(len(large_partition) / elems_per_chunk)
+    def profile_idle_periods(self, iteration, model):
+        if iteration < self.WARMUP_ITERATIONS:
+            print(f"Iteration {iteration+1}: Skipping checkpointing (warmup for profiling).")
+            return False
 
-        local_k = math.ceil(k * elems_per_chunk / len(large_partition))
+        print("Profiling Complete. Calculating Partition Sizes")
 
-        chunk_results = []
-        with ThreadPoolExecutor(max_workers=num_threads) as ex:
-            futures = []
-            for i in range(num_chunks):
-                start_idx = i * elems_per_chunk
-                end_idx = min((i + 1) * elems_per_chunk, len(large_partition))
-                futures.append(ex.submit(self.chunk_topk_worker, large_partition[start_idx:end_idx], local_k))
-            for fut in futures:
-                chunk_results.append(fut.result())
-        # 
-        all_vals = torch.cat([vals for vals, _ in chunk_results])
-        all_idxs = torch.cat([idxs + i * elems_per_chunk
-                          for i, (_, idxs) in enumerate(chunk_results)])
+        forward_idle_times = [0.02, 0.03] # 
+        backward_idle_times = [0.025, 0.035] # 
+    
+        T_f = sum(forward_idle_times)
+        T_b = sum(backward_idle_times)
+        total_idle_time = T_f + T_b
+        print(f"  Total Forward Idle Time (T_f): {T_f:.6f}s")
+        print(f"  Total Backward Idle Time (T_b): {T_b:.6f}s")
+
+        if total_idle_time <= 1e-9:
+            print("  Warning: Total idle time is zero. Cannot size partitions.")
+            return False
+
+        R = self.TOTAL_CHECKPOINT_SIZE
+        forward_partition_sizes = [int(R * (t / total_idle_time)) for t in forward_idle_times]
+        backward_partition_sizes = [int(R * (t / total_idle_time)) for t in backward_idle_times]
+        forward_partition_sizes[-1] = R - sum(forward_partition_sizes[:-1])
+        backward_partition_sizes[-1] = R - sum(backward_partition_sizes[:-1])
+
+        self.checkpointing_data["partition_sizes"] = {
+            "forward": forward_partition_sizes,
+            "backward": backward_partition_sizes
+        }
+
+        print(f"\n  Calculated Partition Sizes:")
+        print(f"    Forward: {forward_partition_sizes} (sum: {sum(forward_partition_sizes)})")
+        print(f"    Backward: {backward_partition_sizes} (sum: {sum(backward_partition_sizes)})")
+    
+        print("  Pre-allocating CPU buffers...")
+        cpu_buffers = {
+            "forward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in forward_partition_sizes],
+            "backward": [torch.empty(size, dtype=torch.float32, device='cpu') for size in backward_partition_sizes]
+        }
+        self.checkpointing_data["cpu_buffers"] = cpu_buffers
+    
+        self.checkpointing_data["compression_params"] = self.profile_compression_and_write_overheads()
+    
+        print("--- Partitioning, Buffer Allocation, and Overhead Profiling Complete ---\n")
+        return True
+
+
+    def async_checkpoint_partition_with_compression(self, partition_type, partition_idx, data):
+
+        if self.checkpointing_data["partition_sizes"] is None or self.checkpointing_data["compression_params"] is None:
+            return
+
+        sizes = self.checkpointing_data["partition_sizes"][partition_type]
+        if partition_idx >= len(sizes): return
+
+        partition_size = sizes[partition_idx]
+        chunk_size = partition_size
         
-        # batched = torch.stack([a, b], dim=0)
-        final_vals, final_rel_idxs = torch.topk(all_vals, k)
-        final_idxs = all_idxs[final_rel_idxs]
-
-        return final_vals, final_idxs
+        prev_data = self.checkpointing_data["prev_checkpoint_data"].get(f"{partition_type}_{partition_idx}") if self.checkpointing_data["prev_checkpoint_data"] else None
+        delta_data = data.flatten()[:chunk_size] - prev_data if prev_data is not None else data.flatten()[:chunk_size]
     
+        if not self.checkpointing_data["prev_checkpoint_data"]:
+            self.checkpointing_data["prev_checkpoint_data"] = {}
+        self.checkpointing_data["prev_checkpoint_data"][f"{partition_type}_{partition_idx}"] = data.flatten()[:chunk_size].clone()
     
-    def optimal_batch_compute(self):
-        """
-        Calculate the value of B when the first derivative of T_flush with respect to B is 0
-    
-        Parameters:
-        R         -- Data volume coefficient
-        Td        -- Disk latency (seconds)
-        Tc        -- Compression time (seconds)
-        Ci_tilde  -- Effective compression capacity or bandwidth
-    
-        Returns:
-        B         -- Optimal batch size
-        """
-        C_tilde = 204.8*2
-        # Write latency
-        Td = 0.01417
-        # Average compression time
-        Tc = 0.0010859
-        Ci_tilde = 204.8/512*2
-        if Tc <= 0 or Ci_tilde <= 0 or R <= 0 or Td <= 0:
-            raise ValueError("All parameters must be positive numbers.")
+        compress, t_compressed_total, t_uncompressed = self.should_compress(partition_size, self.checkpointing_data["compression_params"])
         
-        optimal_size = math.sqrt((C_tilde * Td * Ci_tilde) / Tc)
-        # Number of bytes for each element
-        elem_size = torch.tensor([], dtype=torch.float16).element_size()
-        # MB to bytes
-        size_bytes = optimal_size * 1024 * 1024
-        # Calculate the number of elements
-        return size_bytes // elem_size
-         
-    
-    def calculation_write_time(self, tensor_size, density):
-        # Implementing piecewise functions
-        from scipy.interpolate import interp1d
-        x_size =int(tensor_size*4/1024)
-    
-        x = [0.1, 1, 10, 100, 1000, 10000, 100000, 150000]
-        y = [0.005115201187133789, 0.005463216590881347, 0.0055778751373291016, 0.005975676536560059, 0.019652485847473145, 0.11236395835876464, 1.005709457397461, 1.5160596132278443]
-    
-        if x_size< x[0]:
-            return y[0]
-        elif x_size> x[-1]:
-            return y[-1]
-
-        f = interp1d(x, y)
-
-        result = f(x_size)     
-        return result
-
-
-    def calculation_compression_time(self, tensor_size):
-        # Implementing piecewise functions
-        from scipy.interpolate import interp1d
-
-        x_size =max(1, int(tensor_size*1.0*4/1024)) 
-    
-        x = [10, 100, 1000, 10000, 100000, 1000000]
-        topk_array_time_y =  [ 7.677078247070312e-05, 0.0001761913299560547, 0.0003170967102050781, 0.00024127960205078125, 0.0003452301025390625, 0.0015995502471923828]
-
-        if x_size< x[0]:
-            return topk_array_time_y[0]
+        print(f"Processing {partition_type} partition {partition_idx+1} (size: {partition_size})...")
+        if compress:
+            print(f"Decision: Compress. Estimated time saved: {t_uncompressed - t_compressed_total:.6f}s")
         
-        # 
-        # Create a piecewise interpolation function
-        f = interp1d(x, topk_array_time_y)
-        # Specify new points for interpolation
-        # Generate new points with equal spacing
-                
-        result = f(x_size) 
-        return result
+            start_time = time.time()
+            compressed_chunks = self.parallel_compress_data(delta_data, self.PARALLEL_COMPRESSION_THREADS, self.COMPRESSION_RATIO)
+            end_time = time.time()
+            
+            print(f"Parallel compression of {self.PARALLEL_COMPRESSION_THREADS} chunks completed in {end_time - start_time:.6f}s.")
+        
+            print(f"Simulating write of compressed data.")
+
+        else:
+            print(f"Decision: Bypass compression. Estimated time saved by skipping: {t_compressed_total - t_uncompressed:.6f}s")
+        
+            print(f"Simulating write of uncompressed data.")
+
+    
     
 
     @instrument_w_nvtx
@@ -645,10 +748,7 @@ class PartitionedParameterCoordinator:
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
-    
-    # 
-    # Modify by mingzq
-    # 
+
     @instrument_w_nvtx
     def __all_gather_params(self, params: Set[Parameter], forward: bool) -> None:
         quantized_params = []
@@ -702,8 +802,7 @@ class PartitionedParameterCoordinator:
             ]
             if swap_persisted_params:
                 swap_persisted_params[0].nvme_swapper.remove_partition_and_release_buffers(swap_persisted_params)
-    
-    
+
     @compiler.disable
     @instrument_w_nvtx
     def __release_param(self, param: Parameter) -> None:
@@ -772,18 +871,3 @@ class PartitionedParameterCoordinator:
 
         if swap_in_params:
             swap_in_params[0].nvme_swapper.swap_in(swap_in_params, async_op=True)
-
-
-def _save_ckpt_persistence(queue):
-    while True:
-        batch = queue.get()
-        checkpoint_save_work_dir = './save_path/'
-        output_model_file = os.path.join(checkpoint_save_work_dir, f"run-{uuid.uuid4()}-epoch-{epoch}-iteration-{idx}")
-            
-        save_data={
-            "State":batch,
-        }
-        torch.save(save_data, output_model_file)
-
-
-
