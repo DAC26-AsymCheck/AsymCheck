@@ -31,8 +31,8 @@ class AsymCheckpoint:
         self.flushing_process: Optional[multiprocessing.Process] = None
 
         self.profiling_data: Dict[str, List[float]] = {
-            "fw_start_times": [], "fw_end_times": [],
-            "bw_start_times": [], "bw_end_times": [],
+            "fw_start_times": [], "fw_comm_end_times": [],
+            "bw_start_times": [], "bw_comm_end_times": [],
         }
         self.checkpointing_data: Dict[str, Any] = {
             "partition": None,
@@ -68,28 +68,29 @@ class AsymCheckpoint:
             try:
                 data_to_flush = queue.get(timeout=1)
                 checkpoint_counter += 1
+                with open(f"./checkpoint_batch_{checkpoint_counter}.bin", 'wb') as f:
+                    torch.save(data_to_flush, f)
             except queue.Empty:
                 continue
             
     def profile_idle_periods(self, iteration):
         if iteration < self.warmup:
             return False 
-        
+
         self.forward_idle_times = []
 
         for i in range(len(self.profiling_data["fw_start_times"])):
-            idle_start = self.profiling_data["fw_end_times"][i]
+            idle_start = self.profiling_data["fw_comm_end_times"][i]
             idle_end = self.profiling_data["fw_start_times"][i]
             idle_time = idle_end - idle_start
             self.forward_idle_times.append(idle_time)
-
     
         self.backward_idle_times = []
         
-        bd_start_times = self.profiling_data.get("bd_start_times", [])
+        bd_start_times = self.profiling_data.get("bw_start_times", [])
         for i in range(len(bd_start_times)):
-            if i < len(self.profiling_data["bd_comm_end_times"]):
-                idle_start = self.profiling_data["bd_comm_end_times"][i]
+            if i < len(self.profiling_data["bw_comm_end_times"]):
+                idle_start = self.profiling_data["bw_comm_end_times"][i]
                 idle_end = bd_start_times[i]
                 idle_time = idle_end - idle_start
                 self.backward_idle_times.append(idle_time)

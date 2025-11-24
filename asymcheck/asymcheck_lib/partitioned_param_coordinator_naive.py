@@ -661,7 +661,7 @@ class PartitionedParameterCoordinator:
                 data_to_flush = queue.get(timeout=1)
                 checkpoint_counter += 1
 
-                with open(f"checkpoint_batch_{checkpoint_counter}.bin", 'wb') as f:
+                with open(f"./checkpoint_batch_{checkpoint_counter}.bin", 'wb') as f:
                     torch.save(data_to_flush, f)
 
             except queue.Empty:
@@ -728,7 +728,6 @@ class PartitionedParameterCoordinator:
         backward_partition_sizes[-1] = R - sum(backward_partition_sizes[:-1])
         self.checkpointing_data["partition_sizes"] = {"forward": forward_partition_sizes, "backward": backward_partition_sizes}
         self.checkpointing_data["cp_params"] = self.profile_compression_and_write_overheads()
-        return True
 
 
     def async_checkpoint_partition_with_batching(self, partition_type, partition_idx, data):
@@ -763,8 +762,6 @@ class PartitionedParameterCoordinator:
         }
         torch.save(checkpoint, path)
 
-    
-    
 
     @instrument_w_nvtx
     @torch.no_grad()
@@ -785,7 +782,8 @@ class PartitionedParameterCoordinator:
         for param in iter_params(module, recurse=True):
             if param in self.__inflight_param_registry:
                 raise RuntimeError(f"param {param.ds_summary()} still in flight")
-
+            
+            # 
             # TODO. make this throw if if there are still active submodules. currently
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
