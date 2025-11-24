@@ -2287,16 +2287,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             cpu_tensor_array.append(cpu_buffer[index])
             cpu_buffer[index] = None
         
-        
-        
+ 
         self.module_cpu_tensor_array = cpu_tensor_array
+
+
 
 
     def second_part_checkpoint_step(self, optimizer):
 
         stream_buffer = [torch.cuda.Stream() , torch.cuda.Stream()]
-
-
+        
+        # 32MB
         buffer_size = 32 * 1024 * 1024 // 4  
         # gpu_tensor_1 = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
         gpu_buffer = [ torch.empty(buffer_size, dtype=torch.float32, device=self.device),
@@ -2375,6 +2376,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if cpu_buffer[index] != None:
             cpu_tensor_array.append(cpu_buffer[index])
             cpu_buffer[index] = None
+       
+        self.module_queue.put(cpu_tensor_array)
         
         # 
         # print("optimizer write times = ", time)
@@ -2387,8 +2390,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         torch.cuda.set_device(dist.get_rank())
 
         stream_buffer = [torch.cuda.Stream() , torch.cuda.Stream()]
-
-
+        
+        # 32MB
         buffer_size = 32 * 1024 * 1024 // 4  
         # gpu_tensor_1 = torch.zeros(buffer_size, dtype=torch.float32, device=self.device)
         gpu_buffer = [ torch.empty(buffer_size, dtype=torch.float32, device=self.device),
@@ -2470,7 +2473,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             cpu_buffer[index] = None
         
         self.optimizer_cpu_tensor_array = cpu_tensor_array
-        # queue.put(cpu_tensor_array)
+        self.optimizer_queue.put(cpu_tensor_array)
         # print("optimizer write times = ", time)
         # print("optimizer total size = ", total_size)
         # print("optimizer target write times = ", (total_size / buffer_size))
