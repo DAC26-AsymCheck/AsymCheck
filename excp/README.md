@@ -12,6 +12,8 @@
 * **2024/06/21**: Thanks to the contribution of Cbtor, there is an unofficial serial checkpoints of Pythia-410M [checkpoints](https://huggingface.co/Cbtor/ExCP). You can use `scripts/recon_ckpts.sh` to reconstruct all checkpoints during the training process.
 * **2024/06/14**: Training and compressing codes of Pythia-410M are released [here](https://github.com/Gaffey/ExCP).
 
+
+
 ## Overview
 We propose a novel Extreme Checkpoint Compression (ExCP) framework, which significantly reduces the required storage of training checkpoints while achieving nearly lossless performance. We first calculate the residuals of adjacent checkpoints to obtain the essential but sparse information for higher compression ratio. To further excavate the redundancy parameters in checkpoints, we then propose a weight-momentum joint shrinking method to utilize another important information during the model optimization, i.e., momentum. In particular, we exploit the information of both model and optimizer to discard as many parameters as possible while preserving critical information to ensure optimal performance. Furthermore, we utilize non-uniform quantization to further compress the storage of checkpoints.
 

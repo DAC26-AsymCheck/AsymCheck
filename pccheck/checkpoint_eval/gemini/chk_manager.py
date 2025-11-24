@@ -133,6 +133,9 @@ def save_checkpoint(chk, base_rank, base_world_size, in_progress_snapshot, lock,
         while change.value == 1:
             # this means a checkpoint is on progress (wait for process doing the checkpoint to set variable to 0)
             continue
+        
+        
+        
 
     # Once complete, initiate the next checkpoint synchronously
     with lock:

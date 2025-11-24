@@ -62,11 +62,9 @@ If pip installation fails, please try to upgrade pip via `pip install --upgrade
 
 
 ## **Quick start**
-
 We provide codes for seven types of checkpointing solutions. They are ExCP, DataStates-LLM, PCcheck, Gemini, CheckFreq, and AsymCheck. For each method, there are codes for six models, which are GPT2, BERT, RoBERT, BLOOM, ResNet, and ViT.
 
-For example, to run GPT2 10B with AsymCheck:
-
+For example, to run GPT2 10B, BERT 10B, RoBERT 10B, BLOOM 10B with AsymCheck:
 
 **To run GPT2 10B, BERT 10B, RoBERT 10B, BLOOM 10B training job:**
 ``` shell

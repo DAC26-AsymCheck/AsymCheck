@@ -100,7 +100,6 @@ triton==3.0.0
 tzdata==2024.1
 tzlocal==5.2
 uritools==4.0.3
-wcwidth==0.2.13
 wheel==0.43.0
 
 

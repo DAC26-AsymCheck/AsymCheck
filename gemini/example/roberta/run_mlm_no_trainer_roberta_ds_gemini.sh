@@ -72,10 +72,6 @@ CMD+=" --output_dir ../roberta_mlm_no_trainer_output "
 
 
 
-
-
-
-
 LOGFILE=$OUT_DIR/logfile.txt
 echo "$CMD |& tee $LOGFILE"
 time $CMD |& tee $LOGFILE

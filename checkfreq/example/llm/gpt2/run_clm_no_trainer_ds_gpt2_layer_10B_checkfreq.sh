@@ -12,7 +12,6 @@ if [ ! -d "$OUT_DIR" ]; then
   exit 1
 fi
 
-
 export Save_Checkpoint="./gpt2_checkpoint"
 
 NGPU_PER_NODE=2
@@ -41,10 +40,7 @@ else
 fi
 JOB_NAME="deepspeed_${NGPU}GPUs_${EFFECTIVE_BATCH_SIZE}batch_size"
 
-
-
 config_json=deepspeed_bsz24_z3_config.json
-
 
 CMD=" deepspeed --num_nodes ${NUM_NODES} --num_gpus ${NGPU_PER_NODE} \
       --master_port ${MASTER_PORT} \
@@ -55,7 +51,6 @@ CMD=" deepspeed --num_nodes ${NUM_NODES} --num_gpus ${NGPU_PER_NODE} \
       --deepspeed \
       --deepspeed_config ${config_json} \
       "
-
 
 CMD+=" --dataset_name /data/dataset/nlp/openai-community/wikitext-103-raw-v1 --dataset_config_name default  "
 CMD+=" --model_name_or_path /data/dataset/nlp/openai-community/gpt2-large "
@@ -68,8 +63,6 @@ CMD+=" --per_device_eval_batch_size=$val_batch_size "
 # 
 # CMD+=" --resume_from_checkpoint  $Save_Checkpoint "
 CMD+=" --bert_model  bert-base-uncased "
-
-
 
 LOGFILE=$OUT_DIR/logfile.txt
 echo "$CMD |& tee $LOGFILE"

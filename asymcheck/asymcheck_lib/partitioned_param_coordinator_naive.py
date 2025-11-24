@@ -783,7 +783,6 @@ class PartitionedParameterCoordinator:
             if param in self.__inflight_param_registry:
                 raise RuntimeError(f"param {param.ds_summary()} still in flight")
             
-            # 
             # TODO. make this throw if if there are still active submodules. currently
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
