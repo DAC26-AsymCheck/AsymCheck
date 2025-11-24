@@ -68,6 +68,7 @@ class AsymCheckpoint:
             try:
                 data_to_flush = queue.get(timeout=1)
                 checkpoint_counter += 1
+                        
                 with open(f"./checkpoint_batch_{checkpoint_counter}.bin", 'wb') as f:
                     torch.save(data_to_flush, f)
             except queue.Empty:
@@ -101,7 +102,7 @@ class AsymCheckpoint:
 
     def _profile_overheads(self):
         params = {}
-        test_sizes = [64 * 1024, 256 * 1024, 1024 * 1024]
+        test_sizes = [64 * 1024, 256 * 1024, 1024 * 1024, 256* 1024 * 1024]
         compression_times, write_times = [], []
 
         for size in test_sizes:
