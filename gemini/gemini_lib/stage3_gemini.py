@@ -2501,12 +2501,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # print("wait for module ckpt")
             self.save_module_thread.join()
             
-        # if self.step_count == 40:
-        #     save_dir = "./checkpoint/"
-        #     save_ckpt_to_disk_sync(self.module_cpu_tensor_array, self.optimizer_cpu_tensor_array, dist.get_rank(), "./checkpoint/")
-        # if self.step_count == 40:
-        #     self.module_queue.put(self.module_cpu_tensor_array)
-        #     self.optimizer_queue.put(self.optimizer_cpu_tensor_array)
+        save_dir = "./checkpoint/"
+        save_ckpt_to_disk_sync(self.module_cpu_tensor_array, self.optimizer_cpu_tensor_array, dist.get_rank(), "./checkpoint/")
+
             
         """
             Not supporting closure.
