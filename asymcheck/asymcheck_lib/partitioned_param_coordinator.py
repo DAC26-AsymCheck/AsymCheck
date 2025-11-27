@@ -388,7 +388,7 @@ class PartitionedParameterCoordinator:
                 if forward:
                     # Profiling forward idle time 
                     if self.ckpt.profiling_data["fw_start_times"]: # 
-                        self.ckpt.profiling_data["fw_end_times"].append(comm_end_time)
+                        self.ckpt.profiling_data["fw_comm_end_times"].append(comm_end_time)
                     
                     if self.__step_id < len(self.param_groups) - 1: 
                         self.ckpt.profiling_data["fw_start_times"].append(time.time())
@@ -400,7 +400,7 @@ class PartitionedParameterCoordinator:
                 else:
                     # Profiling backward idle time 
                     if self.profiling_data["bw_start_times"]: # 
-                        self.profiling_data["bw_end_times"].append(comm_end_time)
+                        self.profiling_data["bw_comm_end_times"].append(comm_end_time)
                     
                     if self.__step_id < len(self.param_groups) - 1: 
                         self.profiling_data["bw_start_times"].append(time.time())

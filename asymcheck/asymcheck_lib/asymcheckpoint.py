@@ -106,9 +106,10 @@ class AsymCheckpoint:
         compression_times, write_times = [], []
 
         for size in test_sizes:
-            dummy_data = torch.randn(size, device='cpu')
+            num_elements = size//4
+            dummy_data = torch.randn(num_elements, device='cpu', dtype=torch.float32)
             start = time.time()
-            k = int(size * self.ratio)
+            k = int(num_elements * self.ratio)
             torch.topk(torch.abs(dummy_data), k)
             compression_times.append(time.time() - start)
 
